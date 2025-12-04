@@ -1,130 +1,67 @@
-const express = require("express");
-const fetch = require("node-fetch");
-const { addonBuilder } = require("stremio-addon-sdk");
-const { createProxyMiddleware } = require("http-proxy-middleware");
-
-const manifest = {
-    id: "cricfy.tv.shanny",
-    version: "1.0.0",
-    name: "Cricfy TV Live",
-    description: "Watch Cricfy TV live cricket streams",
-    logo: "https://i.imgur.com/FYx0A8t.png",
-    catalogs: [{ type: "tv", id: "cricfy_catalog", name: "Cricfy Live" }],
-    resources: ["catalog", "stream", "meta"],
-    types: ["tv"],
-    idPrefixes: ["cricfy"]
-};
-
-async function getCricfyChannels() {
-    const url = "https://cricfy.world/android/live.php";
-
-    try {
-        const res = await fetch(url);
-        const json = await res.json();
-
-        return json.channels.map(ch => ({
-            id: "cricfy_" + ch.id,
-            name: ch.name,
-            poster: ch.logo,
-            streamUrl: ch.url
-        }));
-    } catch (e) {
-        console.error("Error fetching Cricfy:", e);
-        return [];
-    }
-}
-
-const builder = new addonBuilder(manifest);
-
-// Catalog Handler
-builder.defineCatalogHandler(async () => {
-    const channels = await getCricfyChannels();
-
-    return {
-        metas: channels.map(ch => ({
-            id: ch.id,
-            name: ch.name,
-            type: "tv",
-            poster: ch.poster,
-            posterShape: "landscape"
-        }))
-    };
-});
-
-// Meta Handler
-builder.defineMetaHandler(async ({ id }) => {
-    const channels = await getCricfyChannels();
-    const ch = channels.find(x => x.id === id);
-
-    if (!ch) return { meta: {} };
-
-    return {
-        meta: {
-            id: ch.id,
-            name: ch.name,
-            type: "tv",
-            poster: ch.poster,
-            background: ch.poster
-        }
-    };
-});
-
-// Stream Handler
-builder.defineStreamHandler(async ({ id }) => {
-    const channels = await getCricfyChannels();
-    const ch = channels.find(x => x.id === id);
-
-    if (!ch) return { streams: [] };
-
-    return {
-        streams: [
-            {
-                title: ch.name,
-                url: process.env.BASE_URL + "/proxy?url=" + encodeURIComponent(ch.streamUrl)
-            }
-        ]
-    };
-});
+const express = require('express');
+const cors = require('cors');
+const fetch = require('node-fetch');
+const { createProxyMiddleware } = require('http-proxy-middleware');
+const { addonBuilder } = require('stremio-addon-sdk');
 
 
-// Express server
 const app = express();
+app.use(cors());
 
-// CORS
-app.use((req, res, next) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Headers", "*");
-    next();
-});
 
-// Landing page
-app.get("/", (req, res) => {
-    res.send({
-        addon: "Cricfy Stremio Addon",
-        status: "online",
-        manifest: process.env.BASE_URL + "/manifest.json"
-    });
-});
-
-// Proxy for streams
+// ---------------------------
+// PROXY for stream URLs
+// ---------------------------
 app.use(
-    "/proxy",
-    createProxyMiddleware({
-        target: "",
-        changeOrigin: true,
-        secure: false,
-        router: req => req.query.url,
-        pathRewrite: { "^/proxy": "" }
-    })
+'/proxy',
+createProxyMiddleware({
+target: 'https://',
+changeOrigin: true,
+pathRewrite: { '^/proxy': '' },
+secure: false,
+onProxyReq: (proxyReq) => {
+proxyReq.setHeader('User-Agent', 'Mozilla/5.0');
+},
+})
 );
 
-// Correct router for Stremio SDK v1.x
-const addonInterface = builder.getInterface();
-app.use(addonInterface.router);
 
-const PORT = process.env.PORT || 3000;
-process.env.BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+// ---------------------------
+// Cricfy Live Channels
+// ---------------------------
+const CHANNELS = [
+{
+id: 'cricfy-001',
+name: 'Cricfy HD 1',
+url: 'https://cricfy.live/ch1/index.m3u8'
+},
+{
+id: 'cricfy-002',
+name: 'Cricfy HD 2',
+url: 'https://cricfy.live/ch2/index.m3u8'
+},
+{
+id: 'cricfy-003',
+name: 'Cricfy Backup',
+url: 'https://cricfy.live/ch3/index.m3u8'
+}
+];
 
-app.listen(PORT, () => {
-    console.log("Cricfy addon running on port " + PORT);
-});
+
+// ---------------------------
+// Stremio Manifest
+// ---------------------------
+const manifest = {
+id: 'com.cricfy.stremio',
+version: '1.0.0',
+name: 'Cricfy Live TV',
+description: 'Watch Cricfy live cricket streams in Stremio',
+logo: 'https://i.imgur.com/9Qf2P0K.png',
+types: ['tv'],
+catalogs: [
+{
+type: 'tv',
+id: 'cricfy_catalog',
+name: 'Cricfy Live TV'
+}
+app.listen(PORT, () => console.log(`Cricfy addon running on port ${PORT}`));
