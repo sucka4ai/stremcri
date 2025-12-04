@@ -29,14 +29,14 @@ async function getCricfyChannels() {
             streamUrl: ch.url
         }));
     } catch (e) {
-        console.error("ERROR fetching Cricfy:", e);
+        console.error("Error fetching Cricfy:", e);
         return [];
     }
 }
 
 const builder = new addonBuilder(manifest);
 
-// Catalog
+// Catalog Handler
 builder.defineCatalogHandler(async () => {
     const channels = await getCricfyChannels();
 
@@ -51,7 +51,7 @@ builder.defineCatalogHandler(async () => {
     };
 });
 
-// Meta
+// Meta Handler
 builder.defineMetaHandler(async ({ id }) => {
     const channels = await getCricfyChannels();
     const ch = channels.find(x => x.id === id);
@@ -69,7 +69,7 @@ builder.defineMetaHandler(async ({ id }) => {
     };
 });
 
-// Stream
+// Stream Handler
 builder.defineStreamHandler(async ({ id }) => {
     const channels = await getCricfyChannels();
     const ch = channels.find(x => x.id === id);
@@ -80,26 +80,24 @@ builder.defineStreamHandler(async ({ id }) => {
         streams: [
             {
                 title: ch.name,
-                url:
-                    process.env.BASE_URL +
-                    "/proxy?url=" +
-                    encodeURIComponent(ch.streamUrl)
+                url: process.env.BASE_URL + "/proxy?url=" + encodeURIComponent(ch.streamUrl)
             }
         ]
     };
 });
 
-// Express app
+
+// Express server
 const app = express();
 
-// CORS (important)
+// CORS
 app.use((req, res, next) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Headers", "*");
     next();
 });
 
-// Home test page
+// Landing page
 app.get("/", (req, res) => {
     res.send({
         addon: "Cricfy Stremio Addon",
@@ -108,7 +106,7 @@ app.get("/", (req, res) => {
     });
 });
 
-// Proxy
+// Proxy for streams
 app.use(
     "/proxy",
     createProxyMiddleware({
@@ -120,13 +118,12 @@ app.use(
     })
 );
 
-// Mount addon router (the correct way)
-const router = builder.getRouter();
-app.use(router);
+// Correct router for Stremio SDK v1.x
+const addonInterface = builder.getInterface();
+app.use(addonInterface.router);
 
 const PORT = process.env.PORT || 3000;
-process.env.BASE_URL =
-    process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+process.env.BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
 app.listen(PORT, () => {
     console.log("Cricfy addon running on port " + PORT);
