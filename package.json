@@ -1,16 +1,17 @@
 {
-"name": "cricfy-stremio-addon",
-"version": "1.0.0",
-"description": "Cricfy TV Live Streaming Stremio Addon",
-"main": "server.js",
-"scripts": {
-"start": "node server.js"
-},
-"dependencies": {
-"express": "^4.18.2",
-"stremio-addon-sdk": "^1.6.5",
-"node-fetch": "^2.6.11",
-"http-proxy-middleware": "^2.0.6",
-"cors": "^2.8.5"
-}
+  "name": "cricfy-stremio-addon",
+  "version": "1.0.1",
+  "description": "Cricfy TV Live Streaming Stremio Addon (fixed & Render-ready)",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "stremio-addon-sdk": "1.6.5",
+    "node-fetch": "^2.6.12",
+    "http-proxy-middleware": "^2.0.6",
+    "cors": "^2.8.5"
+  }
 }
