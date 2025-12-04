@@ -16,11 +16,14 @@ app.use(express.json());
 app.use(
   "/proxy",
   createProxyMiddleware({
+    target: "http://localhost",  // placeholder target
     changeOrigin: true,
     secure: false,
-    router: req => decodeURIComponent(req.query.url || ''),
-    pathRewrite: { "^/proxy": "" },
-    onProxyReq: proxyReq => {
+    pathRewrite: (path, req) => {
+      // remove /proxy/ from path
+      return decodeURIComponent(path.replace("/proxy/", ""));
+    },
+    onProxyReq: (proxyReq) => {
       proxyReq.setHeader("User-Agent", "Mozilla/5.0");
       proxyReq.setHeader("Referer", "https://cricfy.live/");
     },
@@ -45,7 +48,7 @@ const CHANNELS = [
 // ---------------------------
 const manifest = {
   id: "com.sucka.cricfy",
-  version: "1.0.3",
+  version: "1.0.4",
   name: "Cricfy TV",
   description: "Live cricket channels from Cricfy",
   logo: "https://i.imgur.com/9Qf2P0K.png",
@@ -107,14 +110,15 @@ builder.defineStreamHandler(args => {
 });
 
 // ---------------------------
-// Optional health endpoint
+// Health & manifest endpoints
 // ---------------------------
 app.get("/health", (req, res) => res.json({ ok: true }));
 app.get("/", (req, res) => res.json({ addon: manifest.name, manifest: `${BASE_URL}/manifest.json` }));
 app.get("/manifest.json", (req, res) => res.json(builder.getManifest()));
 
 // ---------------------------
-// Start the server using serveHTTP (official SDK)
+// Start the addon
+// ---------------------------
 serveHTTP(builder.getInterface(), { port: PORT });
 
 console.log(`${manifest.name} running on port ${PORT} (BASE_URL=${BASE_URL})`);
