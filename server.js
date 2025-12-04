@@ -16,7 +16,6 @@ const manifest = {
 };
 
 async function getCricfyChannels() {
-    // Cricfy free API mirror (safe)
     const url = "https://cricfy.world/android/live.php";
 
     try {
@@ -30,29 +29,29 @@ async function getCricfyChannels() {
             streamUrl: ch.url
         }));
     } catch (e) {
-        console.error("Error fetching Cricfy:", e);
+        console.error("ERROR fetching Cricfy:", e);
         return [];
     }
 }
 
 const builder = new addonBuilder(manifest);
 
-// ---- Catalog ----
+// Catalog
 builder.defineCatalogHandler(async () => {
     const channels = await getCricfyChannels();
 
-    const metas = channels.map(ch => ({
-        id: ch.id,
-        name: ch.name,
-        type: "tv",
-        poster: ch.poster,
-        posterShape: "landscape"
-    }));
-
-    return { metas };
+    return {
+        metas: channels.map(ch => ({
+            id: ch.id,
+            name: ch.name,
+            type: "tv",
+            poster: ch.poster,
+            posterShape: "landscape"
+        }))
+    };
 });
 
-// ---- Meta ----
+// Meta
 builder.defineMetaHandler(async ({ id }) => {
     const channels = await getCricfyChannels();
     const ch = channels.find(x => x.id === id);
@@ -70,7 +69,7 @@ builder.defineMetaHandler(async ({ id }) => {
     };
 });
 
-// ---- Stream (with proxy) ----
+// Stream
 builder.defineStreamHandler(async ({ id }) => {
     const channels = await getCricfyChannels();
     const ch = channels.find(x => x.id === id);
@@ -81,15 +80,35 @@ builder.defineStreamHandler(async ({ id }) => {
         streams: [
             {
                 title: ch.name,
-                url: process.env.BASE_URL + "/proxy?url=" + encodeURIComponent(ch.streamUrl)
+                url:
+                    process.env.BASE_URL +
+                    "/proxy?url=" +
+                    encodeURIComponent(ch.streamUrl)
             }
         ]
     };
 });
 
-// Express server for proxy + addon
+// Express app
 const app = express();
 
+// CORS (important)
+app.use((req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Headers", "*");
+    next();
+});
+
+// Home test page
+app.get("/", (req, res) => {
+    res.send({
+        addon: "Cricfy Stremio Addon",
+        status: "online",
+        manifest: process.env.BASE_URL + "/manifest.json"
+    });
+});
+
+// Proxy
 app.use(
     "/proxy",
     createProxyMiddleware({
@@ -101,17 +120,13 @@ app.use(
     })
 );
 
-// Stremio addon endpoint
-app.get("/manifest.json", (req, res) => {
-    res.send(builder.getManifest());
-});
-
-app.get("/:resource/:type/:id.json", (req, res) => {
-    builder.getRouter()(req, res);
-});
+// Mount addon router (the correct way)
+const router = builder.getRouter();
+app.use(router);
 
 const PORT = process.env.PORT || 3000;
-process.env.BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+process.env.BASE_URL =
+    process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
 app.listen(PORT, () => {
     console.log("Cricfy addon running on port " + PORT);
