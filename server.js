@@ -1,10 +1,13 @@
 const express = require("express");
 const cors = require("cors");
+const fetch = require("node-fetch");
 const { createProxyMiddleware } = require("http-proxy-middleware");
 const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
+const { parseM3U } = require("@iptv/playlist");
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
+const PLAYLIST_URL = process.env.PLAYLIST_URL || "https://cricfy.live/playlist.m3u"; // Replace with actual M3U URL
 
 const app = express();
 app.use(cors());
@@ -16,13 +19,10 @@ app.use(express.json());
 app.use(
   "/proxy",
   createProxyMiddleware({
-    target: "http://localhost",  // placeholder target
+    target: "http://localhost",
     changeOrigin: true,
     secure: false,
-    pathRewrite: (path, req) => {
-      // remove /proxy/ from path
-      return decodeURIComponent(path.replace("/proxy/", ""));
-    },
+    pathRewrite: (path, req) => decodeURIComponent(path.replace("/proxy/", "")),
     onProxyReq: (proxyReq) => {
       proxyReq.setHeader("User-Agent", "Mozilla/5.0");
       proxyReq.setHeader("Referer", "https://cricfy.live/");
@@ -35,25 +35,44 @@ app.use(
 );
 
 // ---------------------------
-// Channels list
+// Fetch + parse channels dynamically
 // ---------------------------
-const CHANNELS = [
-  { id: "cricfy-1", name: "Cricfy HD 1", url: "https://cricfy.live/ch1/index.m3u8" },
-  { id: "cricfy-2", name: "Cricfy HD 2", url: "https://cricfy.live/ch2/index.m3u8" },
-  { id: "cricfy-3", name: "Cricfy Backup", url: "https://cricfy.live/ch3/index.m3u8" }
-];
+async function fetchChannels() {
+  try {
+    const res = await fetch(PLAYLIST_URL, { timeout: 15000 });
+    const txt = await res.text();
+    const playlist = parseM3U(txt);
+
+    const channels = playlist.channels
+      .filter(ch => ch.url) // ensure URL exists
+      .map((ch, idx) => ({
+        id: `cricfy_${idx}_${encodeURIComponent(ch.url)}`,
+        name: ch.tvgName || ch.name || `Channel ${idx + 1}`,
+        url: ch.url,
+        group: ch.groupTitle || "Live",
+        logo: ch.tvgLogo || null,
+        extras: ch.extras || {}
+      }));
+    return channels;
+  } catch (err) {
+    console.warn("Failed to fetch/parse playlist:", err);
+    return [];
+  }
+}
 
 // ---------------------------
 // Addon manifest
 // ---------------------------
 const manifest = {
   id: "com.sucka.cricfy",
-  version: "1.0.4",
-  name: "Cricfy TV",
-  description: "Live cricket channels from Cricfy",
+  version: "1.0.6",
+  name: "Cricfy TV Dynamic",
+  description: "Cricfy live channels — dynamically fetched",
   logo: "https://i.imgur.com/9Qf2P0K.png",
   types: ["tv"],
-  catalogs: [{ type: "tv", id: "cricfy_catalog", name: "Cricfy Live TV" }],
+  catalogs: [
+    { type: "tv", id: "cricfy_catalog", name: "Cricfy Live Channels" }
+  ],
   resources: ["catalog", "meta", "stream"]
 };
 
@@ -62,51 +81,56 @@ const builder = new addonBuilder(manifest);
 // ---------------------------
 // Catalog handler
 // ---------------------------
-builder.defineCatalogHandler(args => {
-  if (args.type !== "tv") return { metas: [] };
-  const metas = CHANNELS.map(ch => ({
+builder.defineCatalogHandler(async (args) => {
+  const channels = await fetchChannels();
+  const metas = channels.map(ch => ({
     id: ch.id,
     type: "tv",
     name: ch.name,
-    poster: "https://i.imgur.com/9Qf2P0K.png",
+    poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png",
     posterShape: "landscape",
-    description: "Cricfy live cricket stream"
+    description: ch.group || "Live"
   }));
-  return Promise.resolve({ metas });
+  return { metas };
 });
 
 // ---------------------------
 // Meta handler
 // ---------------------------
-builder.defineMetaHandler(args => {
-  const ch = CHANNELS.find(c => c.id === args.id);
-  if (!ch) return Promise.resolve({ meta: {} });
-  return Promise.resolve({
+builder.defineMetaHandler(async ({ id }) => {
+  const channels = await fetchChannels();
+  const ch = channels.find(c => c.id === id);
+  if (!ch) return { meta: {} };
+  return {
     meta: {
       id: ch.id,
       type: "tv",
       name: ch.name,
-      poster: "https://i.imgur.com/9Qf2P0K.png",
-      background: "https://i.imgur.com/9Qf2P0K.png",
-      description: "Cricfy live cricket stream"
+      poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png",
+      background: ch.logo || null,
+      description: ch.group || "Live"
     }
-  });
+  };
 });
 
 // ---------------------------
 // Stream handler
 // ---------------------------
-builder.defineStreamHandler(args => {
-  const ch = CHANNELS.find(c => c.id === args.id);
-  if (!ch) return Promise.resolve({ streams: [] });
-  return Promise.resolve({
+builder.defineStreamHandler(async ({ id }) => {
+  const channels = await fetchChannels();
+  const ch = channels.find(c => c.id === id);
+  if (!ch) return { streams: [] };
+
+  console.log("Serving stream:", ch.url);
+
+  return {
     streams: [
       {
         title: ch.name,
         url: `${BASE_URL}/proxy/${encodeURIComponent(ch.url)}`
       }
     ]
-  });
+  };
 });
 
 // ---------------------------
@@ -120,5 +144,4 @@ app.get("/manifest.json", (req, res) => res.json(builder.getManifest()));
 // Start the addon
 // ---------------------------
 serveHTTP(builder.getInterface(), { port: PORT });
-
 console.log(`${manifest.name} running on port ${PORT} (BASE_URL=${BASE_URL})`);
