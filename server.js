@@ -1,17 +1,11 @@
 /**
- * Enhanced Cricfy Stremio Addon (no EPG)
- * - Dynamic playlist parsing
- * - Auto categories (group-title)
- * - Playlist caching & background refresh
- * - Stream health checks & auto-retry of candidate URLs
- * - Proxy for .m3u8 with correct target placeholder
- * - Manual /refresh endpoint
+ * Unified Cricfy Stremio Addon
+ * - Priority C: auto-detect & scrape Cricfy domains for streams
+ * - Fallback A: parse user-provided M3U (PLAYLIST_URL env)
+ * - Fallback B: stable HLS fallback channels
+ * - Dynamic categories, caching, health checks, proxying
  *
- * Configure:
- * - PLAYLIST_URL    : M3U playlist URL (env or change default)
- * - PLAYLIST_TTL_MS : cache TTL (default 60s)
- * - HEALTH_INTERVAL_MS : how often to check streams (default 30s)
- * - BASE_URL        : optional publicly-accessible base URL (Render sets RENDER_EXTERNAL_URL)
+ * Paste this into server.js and deploy on Render.
  */
 
 const express = require("express");
@@ -23,22 +17,18 @@ const { parse } = require("iptv-playlist-parser");
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-const PLAYLIST_URL = process.env.PLAYLIST_URL || "https://cricfy.live/playlist.m3u"; // ← replace with working M3U
-const PLAYLIST_TTL_MS = Number(process.env.PLAYLIST_TTL_MS) || 60 * 1000;
-const HEALTH_INTERVAL_MS = Number(process.env.HEALTH_INTERVAL_MS) || 30 * 1000;
-const MAX_HEALTH_CHECK_CONCURRENCY = 8; // safety
+const PLAYLIST_URL = process.env.PLAYLIST_URL || ""; // optional user M3U
+const PLAYLIST_TTL_MS = Number(process.env.PLAYLIST_TTL_MS || 60 * 1000);
+const HEALTH_INTERVAL_MS = Number(process.env.HEALTH_INTERVAL_MS || 30 * 1000);
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ---------------------------
-// Proxy for stream URLs
-// ---------------------------
+// proxy middleware (placeholder target required)
 app.use(
   "/proxy",
   createProxyMiddleware({
-    // placeholder required by http-proxy-middleware
     target: "http://localhost",
     changeOrigin: true,
     secure: false,
@@ -55,183 +45,295 @@ app.use(
   })
 );
 
-// ---------------------------
-// In-memory caches & health map
-// ---------------------------
-let playlistCache = { ts: 0, items: [] }; // {ts, items: [...]}
-const healthStatus = new Map(); // key = candidateURL, value = { ok: true/false, lastChecked: ts, latency }
+// ---------- Stable fallback channels (B) ----------
+const STABLE_FALLBACK_CHANNELS = [
+  // Add any tested HLS streams you want as fallback examples
+  {
+    id: "fallback_1",
+    name: "Stable Sports 1",
+    url: "https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8",
+    group: "Stable"
+  },
+  {
+    id: "fallback_2",
+    name: "Stable Sports 2",
+    url: "https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8",
+    group: "Stable"
+  }
+];
 
-// ---------------------------
-// Utilities
-// ---------------------------
-function now() { return Date.now(); }
-function makeChannelId(idx, url) {
-  return `cricfy_${idx}_${Buffer.from(url).toString("base64").replace(/=+$/,"")}`;
+// ---------- Cricfy domains to auto-detect (C) ----------
+const CRICFY_DOMAINS = [
+  "https://cricfy.live",
+  "https://cricfy.world",
+  "https://cricfy.xyz",
+  "https://cricfy.fun",
+  "https://cricfy.site",
+  "https://stremcri.onrender.com" // keep your own as potential mirror if you add
+];
+
+// ---------- In-memory cache & health map ----------
+let playlistCache = { ts: 0, items: [] }; // items: [{id,name,group,logo,candidates}]
+const healthStatus = new Map(); // url -> { ok, status, lastChecked, latency }
+
+// utils
+const now = () => Date.now();
+function makeId(prefix, idx, url) {
+  const encoded = Buffer.from(url).toString("base64").replace(/=+$/,"");
+  return `${prefix}_${idx}_${encoded}`;
+}
+function splitCandidates(urlString) {
+  if (!urlString) return [];
+  // split common separators
+  const parts = urlString.split(/[,|;]/).map(s => s.trim()).filter(Boolean);
+  return parts.length ? parts : [urlString];
 }
 
-function splitCandidates(url) {
-  // Accept comma-separated or pipe-separated lists; fallback to single URL
-  if (!url) return [];
-  const parts = url.split(/[,|;]/).map(s => s.trim()).filter(Boolean);
-  return parts.length ? parts : [url];
-}
-
-async function probeUrl(url, timeoutMs = 5000) {
-  // quick check to see if a stream responds
+// quick probe
+async function probeUrl(url, timeout = 5000) {
   try {
-    const res = await fetch(url, { method: "GET", timeout: timeoutMs, redirect: "follow" });
-    const ok = res && (res.status >= 200 && res.status < 400);
-    const latency = res && res.headers && res.headers.get("x-response-time") ? Number(res.headers.get("x-response-time")) : null;
-    return { ok, status: res ? res.status : 0, latency };
-  } catch (err) {
-    return { ok: false, status: 0, latency: null };
+    const res = await fetch(url, { method: "GET", timeout, redirect: "follow" });
+    const ok = res && res.status >= 200 && res.status < 400;
+    return { ok, status: res ? res.status : 0 };
+  } catch (e) {
+    return { ok: false, status: 0 };
   }
 }
 
-// ---------------------------
-// Fetch & parse playlist (with cache)
-// ---------------------------
+// ---------- Fetch + parse M3U (A) ----------
+async function parseUserM3U(url) {
+  try {
+    const r = await fetch(url, { timeout: 20000 });
+    const txt = await r.text();
+    const pl = parse(txt);
+    return pl.items
+      .filter(i => i && i.url)
+      .map((it, idx) => {
+        const group = it.group || it.tvg?.group || "User Playlist";
+        const logo = it.tvg?.logo || null;
+        const candidates = splitCandidates(it.url);
+        return {
+          id: makeId("user", idx, it.url),
+          name: it.name || it.tvg?.name || `User ${idx + 1}`,
+          group,
+          logo,
+          candidates
+        };
+      });
+  } catch (e) {
+    console.warn("User M3U parse failed:", e && e.message ? e.message : e);
+    return [];
+  }
+}
+
+// ---------- Cricfy scraping (C) - multi-method attempts ----------
+async function tryCricfyJsonApi(domain) {
+  // Some Cricfy mirrors expose android/live.php or similar returning JSON
+  const endpoints = [
+    "/android/live.php",
+    "/api/live.php",
+    "/live.php",
+    "/channels.json",
+    "/channels.php"
+  ];
+  for (const ep of endpoints) {
+    try {
+      const url = domain.replace(/\/$/, "") + ep;
+      const r = await fetch(url, { timeout: 10000 });
+      if (!r.ok) continue;
+      const txt = await r.text();
+      // some return JSON, some HTML. Try to parse JSON if possible.
+      try {
+        const json = JSON.parse(txt);
+        if (json && Array.isArray(json.channels)) {
+          return json.channels.map((ch, idx) => {
+            const url = ch.url || ch.stream || ch.link || null;
+            const logo = ch.logo || ch.image || null;
+            const name = ch.name || ch.title || `Cricfy ${idx+1}`;
+            const group = ch['group-title'] || ch.group || 'Cricfy';
+            return { id: makeId("cricfy", idx, url || name), name, group, logo, candidates: splitCandidates(url) };
+          }).filter(c => c.candidates && c.candidates.length);
+        }
+      } catch (e) {
+        // not JSON — ignore
+      }
+    } catch (e) {
+      // ignore endpoint failure
+    }
+  }
+  return [];
+}
+
+async function tryCricfyHtml(domain) {
+  try {
+    const r = await fetch(domain, { timeout: 10000, redirect: "follow" });
+    if (!r.ok) return [];
+    const txt = await r.text();
+    // find .m3u8 or http(s) playlist links via regex
+    const m3u8Matches = [...txt.matchAll(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/gi)].map(m => m[0]);
+    const httpMatches = [...txt.matchAll(/https?:\/\/[^\s"'<>]+/gi)].map(m => m[0]);
+
+    // prefer explicit .m3u8 matches
+    const urls = m3u8Matches.length ? m3u8Matches : httpMatches;
+
+    // build channel entries with simple heuristics
+    const unique = Array.from(new Set(urls)).slice(0, 200); // limit
+    return unique.map((u, idx) => ({
+      id: makeId("cricfy_html", idx, u),
+      name: `Cricfy Stream ${idx+1}`,
+      group: "Cricfy",
+      logo: null,
+      candidates: splitCandidates(u)
+    }));
+  } catch (e) {
+    return [];
+  }
+}
+
+async function scrapeCricfyAuto() {
+  // iterate domains, prefer JSON API, then HTML extraction
+  for (const domain of CRICFY_DOMAINS) {
+    try {
+      // 1) try JSON-style endpoints
+      const jsonList = await tryCricfyJsonApi(domain);
+      if (jsonList && jsonList.length) {
+        console.log(`Cricfy JSON source found on ${domain} -> ${jsonList.length} items`);
+        return jsonList;
+      }
+      // 2) try HTML m3u8 extraction
+      const htmlList = await tryCricfyHtml(domain);
+      if (htmlList && htmlList.length) {
+        console.log(`Cricfy HTML extraction found on ${domain} -> ${htmlList.length} items`);
+        return htmlList;
+      }
+    } catch (e) {
+      // ignore domain errors
+    }
+  }
+  return [];
+}
+
+// ---------- Unified fetchPlaylist logic (C -> A -> B) ----------
 async function fetchPlaylist(force = false) {
-  if (!force && (now() - playlistCache.ts) < PLAYLIST_TTL_MS && playlistCache.items.length) {
+  if (!force && playlistCache.ts && (now() - playlistCache.ts) < PLAYLIST_TTL_MS && playlistCache.items.length) {
     return playlistCache.items;
   }
 
+  // 1) Priority C: try Cricfy scraping
+  let items = [];
   try {
-    const res = await fetch(PLAYLIST_URL, { timeout: 20000 });
-    const text = await res.text();
-    const pl = parse(text);
-
-    const items = (pl.items || [])
-      .filter(i => i && i.url)
-      .map((it, idx) => {
-        const group = it.group || it.tvg?.group || it.tvg?.groupTitle || "Other";
-        const logo = it.tvg?.logo || it.logo || null;
-        const name = it.name || it.tvg?.name || `Channel ${idx+1}`;
-        const candidates = splitCandidates(it.url);
-
-        return {
-          id: makeChannelId(idx, it.url),
-          name,
-          candidates,
-          url: candidates[0],
-          group,
-          logo
-        };
-      });
-
-    playlistCache = { ts: now(), items };
-    return items;
-  } catch (err) {
-    console.error("Playlist fetch/parse error:", err && err.message ? err.message : err);
-    // return previous items if exist
-    return playlistCache.items || [];
+    items = await scrapeCricfyAuto();
+  } catch (e) {
+    items = [];
   }
+
+  // 2) Fallback A: user M3U if provided and no items or partially
+  if ((items.length === 0 || PLAYLIST_URL) && PLAYLIST_URL) {
+    try {
+      const userItems = await parseUserM3U(PLAYLIST_URL);
+      if (userItems && userItems.length) {
+        console.log(`User M3U parsed ${userItems.length} items from PLAYLIST_URL`);
+        // merge user items (prefer user categories under group "User Playlist")
+        items = items.concat(userItems);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // 3) Fallback B: include stable fallback streams if still empty
+  if (!items || items.length === 0) {
+    console.warn("No Cricfy or user playlist items found — using stable fallback channels.");
+    items = STABLE_FALLBACK_CHANNELS.map((ch, idx) => ({
+      id: ch.id || makeId("fallback", idx, ch.url),
+      name: ch.name,
+      group: ch.group || "Stable",
+      logo: ch.logo || null,
+      candidates: splitCandidates(ch.url)
+    }));
+  }
+
+  // assign cache, timestamp
+  playlistCache = { ts: now(), items };
+  return items;
 }
 
-// ---------------------------
-// Health check worker
-// - Periodically probes candidate urls and updates healthStatus map
-// ---------------------------
-let healthCheckerTimer = null;
-let ongoingHealthChecks = 0;
-
+// ---------- Health checks ----------
 async function runHealthChecks() {
   try {
     const channels = await fetchPlaylist(false);
-    const candidates = [];
+    const allCandidates = new Set();
+    channels.forEach(c => (c.candidates || []).forEach(u => allCandidates.add(u)));
+    const unique = Array.from(allCandidates);
 
-    channels.forEach(ch => {
-      ch.candidates.forEach(c => candidates.push(c));
-    });
-
-    // dedupe
-    const unique = [...new Set(candidates)];
-
-    // probe sequentially with limited concurrency to avoid flooding
-    for (let i = 0; i < unique.length; i += 1) {
-      if (ongoingHealthChecks >= MAX_HEALTH_CHECK_CONCURRENCY) {
-        // small delay loop
-        await new Promise(r => setTimeout(r, 50));
-        i--; // retry this index later
-        continue;
-      }
-
-      const url = unique[i];
-      ongoingHealthChecks++;
-      (async (u) => {
-        const start = now();
-        const res = await probeUrl(u, 5000);
-        const latency = res.latency || (now() - start);
-        healthStatus.set(u, { ok: !!res.ok, status: res.status || 0, lastChecked: now(), latency });
-        ongoingHealthChecks--;
-      })(url);
+    // probe with limited concurrency
+    const concurrency = 6;
+    for (let i = 0; i < unique.length; i += concurrency) {
+      const slice = unique.slice(i, i + concurrency);
+      await Promise.all(slice.map(async (u) => {
+        try {
+          const res = await probeUrl(u, 5000);
+          healthStatus.set(u, { ok: !!res.ok, status: res.status || 0, lastChecked: now() });
+        } catch (e) {
+          healthStatus.set(u, { ok: false, status: 0, lastChecked: now() });
+        }
+      }));
     }
   } catch (e) {
-    console.warn("Health check loop error:", e && e.message ? e.message : e);
+    console.warn("Health check error:", e && e.message ? e.message : e);
   }
 }
 
-// start health checker interval
-function startHealthChecker() {
-  if (healthCheckerTimer) clearInterval(healthCheckerTimer);
-  // run once immediately
-  runHealthChecks();
-  healthCheckerTimer = setInterval(runHealthChecks, HEALTH_INTERVAL_MS);
-}
+// schedule health checks
+setInterval(() => {
+  runHealthChecks().catch(() => {});
+}, HEALTH_INTERVAL_MS);
 
-// ---------------------------
-// Choose best candidate for a channel (prefer healthy)
-// ---------------------------
-function chooseBestCandidate(candidates) {
+// run one at startup after initial fetch
+(async () => {
+  await fetchPlaylist(true);
+  await runHealthChecks();
+})();
+
+// ---------- Choose best candidate ----------
+function chooseBest(candidates = []) {
   if (!Array.isArray(candidates) || candidates.length === 0) return null;
-
-  // prefer candidates with healthStatus.ok true
   const scored = candidates.map(u => {
-    const s = healthStatus.get(u) || { ok: null, latency: null, lastChecked: 0 };
-    const score = (s.ok ? 1000 : 0) - (s.latency || 0); // higher score = better
-    return { u, ok: !!s.ok, latency: s.latency || 99999, lastChecked: s.lastChecked || 0, score };
+    const s = healthStatus.get(u) || { ok: null, lastChecked: 0 };
+    const score = (s.ok ? 1000 : 0) - (s.lastChecked || 0) / 1000;
+    return { u, ok: !!s.ok, lastChecked: s.lastChecked || 0, score };
   });
-
-  // sort by score desc, lastChecked recent
-  scored.sort((a,b) => b.score - a.score || b.lastChecked - a.lastChecked);
-
-  // pick first that is marked ok; otherwise pick first candidate
+  scored.sort((a,b) => b.score - a.score);
   const healthy = scored.find(s => s.ok);
   if (healthy) return healthy.u;
-  return scored[0] ? scored[0].u : null;
+  return scored[0] ? scored[0].u : candidates[0];
 }
 
-// ---------------------------
-// Live-now detection (best-effort, no EPG)
-// - checks for keywords in name or group
-// ---------------------------
+// ---------- Live-now detection (best-effort) ----------
 function isLiveNow(ch) {
-  if (!ch || !ch.name) return false;
-  const text = `${ch.name} ${ch.group} ${ch.url}`.toLowerCase();
-  const keywords = ['live', 'match', 'vs', 'v ', 't20', 'odi', 'test', 'ipl', 'final', 'semi'];
-  return keywords.some(k => text.includes(k));
+  const s = `${ch.name} ${ch.group}`.toLowerCase();
+  return /live|vs|v |match|ipl|t20|odi|test|final|semi/.test(s);
 }
 
-// ---------------------------
-// Build manifest with dynamic categories (called once at startup after initial fetch)
-// ---------------------------
+// ---------- dynamic manifest building ----------
 async function buildManifest() {
   const channels = await fetchPlaylist(false);
-  const groups = [...new Set(channels.map(c => c.group || 'Other'))].sort();
+  const groups = [...new Set(channels.map(c => c.group || "Other"))].sort();
 
-  // add special LIVE NOW category if any channel appears live
-  const hasLiveNow = channels.some(isLiveNow);
+  const hasLive = channels.some(isLiveNow);
   const catalogs = [
     { type: "tv", id: "cricfy_all", name: "All Channels" },
-    ...(hasLiveNow ? [{ type: "tv", id: "cricfy_live_now", name: "LIVE NOW" }] : []),
-    ...groups.map(g => ({ type: "tv", id: `cricfy_${g.replace(/\s+/g,'_').toLowerCase()}`, name: g }))
+    ...(hasLive ? [{ type: "tv", id: "cricfy_live_now", name: "LIVE NOW" }] : []),
+    ...groups.map(g => ({ type: "tv", id: `cricfy_${g.replace(/\s+/g,'_').toLowerCase()}`, name: g })),
+    // include explicit user playlist catalog if PLAYLIST_URL provided
+    ...(PLAYLIST_URL ? [{ type: "tv", id: "cricfy_user_playlist", name: "My Playlist" }] : [])
   ];
 
   return {
     id: "com.sucka.cricfy",
     version: "1.2.0",
-    name: "Cricfy TV (Enhanced)",
-    description: "Cricfy IPTV with dynamic categories, health checks and retries (no EPG)",
+    name: "Cricfy TV (Unified)",
+    description: "Cricfy + optional M3U + stable fallback. Auto categories, health & retries (no EPG).",
     logo: "https://i.imgur.com/9Qf2P0K.png",
     types: ["tv"],
     catalogs,
@@ -239,56 +341,44 @@ async function buildManifest() {
   };
 }
 
-// ---------------------------
-// Initialize addon (manifest + builder)
-// ---------------------------
+// ---------- Build addon and attach handlers ----------
 let builder;
-let manifest;
-(async function init() {
-  // initial playlist fetch + health checks
-  await fetchPlaylist(true);
-  startHealthChecker();
-
-  // build manifest from categories
-  manifest = await buildManifest();
+(async function initAddon() {
+  const manifest = await buildManifest();
   builder = new addonBuilder(manifest);
 
-  // CATALOG HANDLER
+  // catalog handler
   builder.defineCatalogHandler(async ({ id }) => {
     const channels = await fetchPlaylist(false);
 
+    // All channels
     if (id === "cricfy_all") {
-      return { metas: channels.map((ch) => ({
-        id: ch.id,
-        type: "tv",
-        name: ch.name,
-        poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png",
-        posterShape: "landscape",
-        description: ch.group
-      }))};
-    }
-
-    if (id === "cricfy_live_now") {
-      const live = channels.filter(isLiveNow);
-      return { metas: live.map(ch => ({
+      return { metas: channels.map(ch => ({
         id: ch.id, type: "tv", name: ch.name,
         poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png",
         posterShape: "landscape", description: ch.group
       }))};
     }
 
-    // category catalogs
-    const catName = id.replace(/^cricfy_/, "").replace(/_/g, " ");
-    const filtered = channels.filter(c => (c.group || "Other").toLowerCase() === catName.toLowerCase());
+    // LIVE NOW
+    if (id === "cricfy_live_now") {
+      const live = channels.filter(isLiveNow);
+      return { metas: live.map(ch => ({ id: ch.id, type: "tv", name: ch.name, poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png", description: ch.group })) };
+    }
 
-    return { metas: filtered.map(ch => ({
-      id: ch.id, type: "tv", name: ch.name,
-      poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png",
-      posterShape: "landscape", description: ch.group
-    }))};
+    // User playlist catalog
+    if (id === "cricfy_user_playlist") {
+      const users = channels.filter(c => (c.group || "").toLowerCase().includes("user") || c.id.startsWith("user_"));
+      return { metas: users.map(ch => ({ id: ch.id, type: "tv", name: ch.name, poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png", description: ch.group })) };
+    }
+
+    // category catalogs by group
+    const cat = id.replace(/^cricfy_/, "").replace(/_/g, " ");
+    const filtered = channels.filter(c => (c.group || "Other").toLowerCase() === cat.toLowerCase());
+    return { metas: filtered.map(ch => ({ id: ch.id, type: "tv", name: ch.name, poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png", description: ch.group })) };
   });
 
-  // META HANDLER
+  // meta handler
   builder.defineMetaHandler(async ({ id }) => {
     const channels = await fetchPlaylist(false);
     const ch = channels.find(c => c.id === id);
@@ -301,49 +391,48 @@ let manifest;
     }};
   });
 
-  // STREAM HANDLER (choose best candidate auto)
+  // stream handler
   builder.defineStreamHandler(async ({ id }) => {
     const channels = await fetchPlaylist(false);
     const ch = channels.find(c => c.id === id);
     if (!ch) return { streams: [] };
 
-    // pick best candidate based on healthStatus
-    const best = chooseBestCandidate(ch.candidates);
-    const finalUrl = best || ch.candidates[0] || ch.url;
+    // choose best candidate (health-aware)
+    const best = chooseBest(ch.candidates);
+    const finalUrl = best || ch.candidates[0] || null;
+    if (!finalUrl) return { streams: [] };
 
-    console.log(`Resolving stream for ${ch.name} -> ${finalUrl}`);
+    console.log(`Resolved ${ch.name} -> ${finalUrl}`);
 
     return { streams: [
       { title: ch.name, url: `${BASE_URL}/proxy/${encodeURIComponent(finalUrl)}` }
     ]};
   });
 
-  // EXPRESS ENDPOINTS (health, refresh)
+  // endpoints
   app.get("/", (req, res) => res.json({ status: "ok", name: manifest.name, manifest: `${BASE_URL}/manifest.json` }));
-  app.get("/health", async (req, res) => {
-    return res.json({ ok: true, playlistCachedAt: playlistCache.ts, channels: (playlistCache.items || []).length });
-  });
 
-  // manual refresh endpoint to force reload playlist & re-evaluate categories
-  app.post("/refresh", async (req, res) => {
-    try {
-      await fetchPlaylist(true);
-      await runHealthChecks();
-      // optionally rebuild manifest if categories changed
-      const newManifest = await buildManifest();
-      // If categories changed, log and inform user - re-creation of builder at runtime is complex
-      // We will not hot-swap builder to avoid breaking current stremio interface. Recommend redeploy if categories change drastically.
-      return res.json({ refreshed: true, items: playlistCache.items.length });
-    } catch (e) {
-      return res.status(500).json({ refreshed: false, error: (e && e.message) || String(e) });
-    }
-  });
-
-  // Serve manifest
   app.get("/manifest.json", (req, res) => res.json(builder.getManifest()));
 
-  // Start the addon via serveHTTP (stremio-sdk v1.x style)
-  serveHTTP(builder.getInterface(), { port: PORT });
-  console.log(`${manifest.name} running on ${PORT} (BASE_URL=${BASE_URL})`);
-})();
+  // admin debug: list channels & health
+  app.get("/admin/channels", async (req, res) => {
+    const items = await fetchPlaylist(false);
+    const list = items.map(ch => ({
+      id: ch.id, name: ch.name, group: ch.group, logo: ch.logo, candidates: ch.candidates,
+      resolved: chooseBest(ch.candidates),
+      health: (ch.candidates || []).map(u => ({ url: u, ...(healthStatus.get(u) || {}) }))
+    }));
+    res.json({ items, count: list.length, list });
+  });
 
+  // manual refresh
+  app.post("/refresh", async (req, res) => {
+    await fetchPlaylist(true);
+    await runHealthChecks();
+    res.json({ refreshed: true, items: playlistCache.items.length });
+  });
+
+  // start the addon server via SDK
+  serveHTTP(builder.getInterface(), { port: PORT });
+  console.log(`Cricfy Unified addon running on port ${PORT} (BASE_URL=${BASE_URL})`);
+})();
