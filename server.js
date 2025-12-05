@@ -13,7 +13,7 @@ const { parse } = require("iptv-playlist-parser");
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-const PLAYLIST_URL = process.env.PLAYLIST_URL || "http://161.123.116.21/get.php?username=addi123&password=addi123&type=m3u_plus";
+const PLAYLIST_URL = process.env.PLAYLIST_URL || "http://tvappapk@161.123.116.21/get.php?username=addi123&password=addi123&type=m3u_plus";
 const PLAYLIST_TTL_MS = Number(process.env.PLAYLIST_TTL_MS || 60_000);
 const HEALTH_INTERVAL_MS = Number(process.env.HEALTH_INTERVAL_MS || 30_000);
 
@@ -154,7 +154,7 @@ async function buildManifest() {
   ];
   return {
     id: "com.sucka.cricfy",
-    version: "1.2.1",
+    version: "1.2.2",
     name: "Cricfy TV (Enhanced)",
     description: "Cricfy + optional M3U + stable fallback. Auto categories, health & retries (no EPG).",
     logo: "https://i.imgur.com/9Qf2P0K.png",
