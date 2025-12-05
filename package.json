@@ -1,6 +1,6 @@
 {
   "name": "cricfy-stremio-addon",
-  "version": "1.2.0",
+  "version": "1.2.2",
   "description": "Cricfy TV (Enhanced) Stremio Addon with LIVE NOW, auto categories, M3U optional, fallback streams, proxy, and health checks.",
   "main": "server.js",
   "scripts": {
@@ -14,7 +14,7 @@
     "node-fetch": "^2.6.12",
     "http-proxy-middleware": "^2.0.6",
     "stremio-addon-sdk": "^0.1.0",
-    "iptv-playlist-parser": "^1.0.0"
+    "iptv-playlist-parser": "^0.15.0"
   },
   "engines": {
     "node": ">=22.16.0"
