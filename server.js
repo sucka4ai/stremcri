@@ -1,7 +1,6 @@
 /**
- * Cricfy Stremio Addon (Enhanced) - FINAL
- * Priority: Xtream M3U URL -> Optional ENV M3U -> Fallback streams
- * Categories auto-extracted, streams proxied, health-aware
+ * Cricfy TV (Enhanced) - Manifest-safe, dynamic channels
+ * Supports optional M3U via ENV, fallback streams, categories, LIVE NOW, health
  */
 
 const express = require("express");
@@ -46,7 +45,7 @@ const STABLE_FALLBACK_CHANNELS = [
 let playlistCache = { ts: 0, items: [] };
 const healthStatus = new Map();
 
-// Utils
+// Utilities
 const now = () => Date.now();
 function makeId(prefix, idx, url) {
   const encoded = Buffer.from(url).toString("base64").replace(/=+$/, "");
@@ -64,7 +63,7 @@ async function probeUrl(url) {
   } catch (e) { return { ok: false, status: 0 }; }
 }
 
-// Parse Xtream/ENV M3U
+// Parse M3U playlist
 async function parsePlaylist(url) {
   try {
     const r = await fetch(url, { timeout: 20000 });
@@ -84,7 +83,7 @@ async function parsePlaylist(url) {
   }
 }
 
-// Fetch playlist with priority
+// Fetch playlist with cache & fallback
 async function fetchPlaylist(force = false) {
   if (!force && playlistCache.ts && now() - playlistCache.ts < PLAYLIST_TTL_MS && playlistCache.items.length) {
     return playlistCache.items;
@@ -93,7 +92,7 @@ async function fetchPlaylist(force = false) {
   try { items = await parsePlaylist(PLAYLIST_URL); } catch (e) { items = []; }
 
   if (!items || items.length === 0) {
-    items = STABLE_FALLBACK_CHANNELS.map((ch, idx) => ({
+    items = STABLE_FALLBACK_CHANNELS.map((ch) => ({
       id: ch.id, name: ch.name, group: ch.group, logo: ch.logo || null, candidates: splitCandidates(ch.url)
     }));
   }
@@ -140,10 +139,13 @@ function isLiveNow(ch) {
   return /live|vs|v |match|ipl|t20|odi|test|final|semi/.test(s);
 }
 
-// Build manifest
+// Build manifest (catalogs only)
 async function buildManifest() {
   const channels = await fetchPlaylist(false);
-  const groups = [...new Set(channels.map(c => c.group || "Other"))].sort();
+  const groups = [...new Set(channels.map(c => c.group || "Other"))]
+    .sort()
+    .slice(0, 20); // limit number of catalogs
+
   const catalogs = [
     { type: "tv", id: "all_channels", name: "All Channels" },
     ...(channels.some(isLiveNow) ? [{ type: "tv", id: "live_now", name: "LIVE NOW" }] : []),
@@ -152,11 +154,12 @@ async function buildManifest() {
       return { type: "tv", id: `cat_${gName.replace(/\s+/g,'_').toLowerCase()}`, name: gName };
     })
   ];
+
   return {
     id: "com.sucka.cricfy",
-    version: "1.2.2",
+    version: "1.2.3",
     name: "Cricfy TV (Enhanced)",
-    description: "Cricfy + optional M3U + stable fallback. Auto categories, health & retries (no EPG).",
+    description: "Cricfy + optional M3U + fallback. Auto categories, health, LIVE NOW (no EPG).",
     logo: "https://i.imgur.com/9Qf2P0K.png",
     types: ["tv"],
     catalogs,
@@ -172,23 +175,16 @@ let builder;
 
   builder.defineCatalogHandler(async ({ id }) => {
     const channels = await fetchPlaylist(false);
-
     if (id === "all_channels") {
-      return { metas: channels.map(ch => ({
-        id: ch.id, type: "tv", name: ch.name,
-        poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png",
-        posterShape: "landscape", description: ch.group
-      }))};
+      return { metas: channels.map(ch => ({ id: ch.id, type: "tv", name: ch.name, poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png", posterShape: "landscape", description: ch.group }))};
     }
-
     if (id === "live_now") {
       const live = channels.filter(isLiveNow);
-      return { metas: live.map(ch => ({ id: ch.id, type: "tv", name: ch.name, poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png", description: ch.group })) };
+      return { metas: live.map(ch => ({ id: ch.id, type: "tv", name: ch.name, poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png", description: ch.group }))};
     }
-
     const cat = String(id.replace(/^cat_/, "").replace(/_/g, " "));
     const filtered = channels.filter(c => String(c.group || "Other").toLowerCase() === cat.toLowerCase());
-    return { metas: filtered.map(ch => ({ id: ch.id, type: "tv", name: ch.name, poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png", description: ch.group })) };
+    return { metas: filtered.map(ch => ({ id: ch.id, type: "tv", name: ch.name, poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png", description: ch.group }))};
   });
 
   builder.defineMetaHandler(async ({ id }) => {
@@ -204,13 +200,13 @@ let builder;
     if (!ch) return { streams: [] };
     const best = chooseBest(ch.candidates);
     if (!best) return { streams: [] };
-    return { streams: [{ title: ch.name, url: `${BASE_URL}/proxy/${encodeURIComponent(best)}` }] };
+    return { streams: [{ title: ch.name, url: `${BASE_URL}/proxy/${encodeURIComponent(best)}` }]};
   });
 
-  // endpoints
-  app.get("/", (req, res) => res.json({ status: "ok", name: manifest.name, manifest: `${BASE_URL}/manifest.json` }));
-  app.get("/manifest.json", (req, res) => res.json(builder.getManifest()));
-  app.get("/admin/channels", async (req, res) => {
+  // Health & admin endpoints
+  app.get("/", (req,res) => res.json({ status: "ok", name: manifest.name, manifest: `${BASE_URL}/manifest.json` }));
+  app.get("/manifest.json", (req,res) => res.json(builder.getManifest()));
+  app.get("/admin/channels", async (req,res) => {
     const items = await fetchPlaylist(false);
     const list = items.map(ch => ({
       id: ch.id, name: ch.name, group: ch.group, logo: ch.logo, candidates: ch.candidates,
