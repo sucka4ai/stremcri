@@ -73,7 +73,7 @@ async function parsePlaylist(url) {
     return pl.items
       .filter(i => i && i.url)
       .map((it, idx) => {
-        const group = it.group || it.tvg?.group || "Unknown";
+        const group = it.group || it.tvg?.group || "Other";
         const logo = it.tvg?.logo || null;
         const candidates = splitCandidates(it.url);
         return { id: makeId("ch", idx, it.url), name: it.name || `Channel ${idx+1}`, group, logo, candidates };
@@ -144,11 +144,13 @@ function isLiveNow(ch) {
 async function buildManifest() {
   const channels = await fetchPlaylist(false);
   const groups = [...new Set(channels.map(c => c.group || "Other"))].sort();
-  const hasLive = channels.some(isLiveNow);
   const catalogs = [
     { type: "tv", id: "all_channels", name: "All Channels" },
-    ...(hasLive ? [{ type: "tv", id: "live_now", name: "LIVE NOW" }] : []),
-    ...groups.map(g => ({ type: "tv", id: `cat_${g.replace(/\s+/g,'_').toLowerCase()}`, name: g }))
+    ...(channels.some(isLiveNow) ? [{ type: "tv", id: "live_now", name: "LIVE NOW" }] : []),
+    ...groups.map(g => {
+      const gName = String(g || "Other");
+      return { type: "tv", id: `cat_${gName.replace(/\s+/g,'_').toLowerCase()}`, name: gName };
+    })
   ];
   return {
     id: "com.sucka.cricfy",
@@ -184,9 +186,9 @@ let builder;
       return { metas: live.map(ch => ({ id: ch.id, type: "tv", name: ch.name, poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png", description: ch.group })) };
     }
 
-    const cat = id.replace(/^cat_/, "").replace(/_/g, " ");
-    const filtered = channels.filter(c => (c.group || "Other").toLowerCase() === cat.toLowerCase());
-    return { metas: filtered.map(ch => ({ id: ch.id, type: "tv", name: ch.name, poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png", description: c.group })) };
+    const cat = String(id.replace(/^cat_/, "").replace(/_/g, " "));
+    const filtered = channels.filter(c => String(c.group || "Other").toLowerCase() === cat.toLowerCase());
+    return { metas: filtered.map(ch => ({ id: ch.id, type: "tv", name: ch.name, poster: ch.logo || "https://i.imgur.com/9Qf2P0K.png", description: ch.group })) };
   });
 
   builder.defineMetaHandler(async ({ id }) => {
